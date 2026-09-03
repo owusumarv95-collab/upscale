@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<title>Upscaler</title>
+<style>
+  :root {
+    --bg: #0f172a; --card: #1e293b; --line: #334155;
+    --text: #f1f5f9; --muted: #94a3b8;
+    --accent: #38bdf8; --accent-dark: #0284c7;
+    --ok: #4ade80; --err: #f87171;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { min-height: 100vh; padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  .wrap { max-width: 520px; margin: 0 auto; padding: 20px 16px 40px; }
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: .3px; }
+  .hidden { display: none !important; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px; margin-bottom: 14px; }
+  label { display: block; font-size: 14px; color: var(--muted); margin: 10px 0 6px; }
+  input[type=text], input[type=password], select {
+    width: 100%; padding: 13px 14px; border-radius: 10px; border: 1px solid var(--line);
+    background: #0b1220; color: var(--text); font-size: 16px; }
+  select { appearance: none; -webkit-appearance: none; }
+  button { font-size: 16px; border: 0; border-radius: 12px; padding: 14px 18px; cursor: pointer; font-weight: 600; }
+  .btn { background: var(--accent); color: #041014; width: 100%; }
+  .btn:active { background: var(--accent-dark); }
+  .btn[disabled] { opacity: .5; cursor: default; }
+  .btn-big { font-size: 20px; padding: 22px; margin: 6px 0 14px; border-radius: 16px;
+    box-shadow: 0 8px 24px rgba(56,189,248,.25); }
+  .ghost { background: transparent; color: var(--muted); padding: 8px 10px; font-weight: 500; }
+  .small { font-size: 13px; color: var(--muted); }
+  .err { color: var(--err); font-size: 14px; margin-top: 10px; min-height: 18px; }
+  .row { display: flex; gap: 10px; align-items: center; }
+  .row > * { flex: 1; }
+  .bar { height: 12px; background: #0b1220; border-radius: 99px; overflow: hidden; border: 1px solid var(--line); margin: 10px 0 6px; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s; }
+  .bar.busy > i { background: repeating-linear-gradient(45deg, var(--accent) 0 12px, var(--accent-dark) 12px 24px); }
+  .job { border-top: 1px solid var(--line); padding: 12px 0; }
+  .job:first-child { border-top: 0; padding-top: 0; }
+  .job .name { font-weight: 600; word-break: break-all; }
+  .job .meta { font-size: 13px; color: var(--muted); margin: 3px 0 8px; }
+  .job .st-done { color: var(--ok); } .job .st-error { color: var(--err); }
+  .dl { display: inline-block; text-decoration: none; background: var(--ok); color: #041014;
+    padding: 11px 16px; border-radius: 10px; font-weight: 700; }
+  .del { background: transparent; color: var(--muted); padding: 11px 8px; font-weight: 500; }
+  .check { display: flex; align-items: center; gap: 10px; margin: 12px 0 4px; font-size: 15px; }
+  .check input { width: 20px; height: 20px; }
+  .hint { font-size: 13px; color: var(--muted); line-height: 1.5; margin-top: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- ===== LOGIN ===== -->
+  <section id="login" class="hidden">
+    <header><h1>Upscaler</h1></header>
+    <div class="card">
+      <label for="u">Benutzername</label>
+      <input id="u" type="text" autocomplete="username" autocapitalize="none">
+      <label for="p">Passwort</label>
+      <input id="p" type="password" autocomplete="current-password">
+      <div style="height:16px"></div>
+      <button class="btn" id="loginBtn">Anmelden</button>
+      <div class="err" id="loginErr"></div>
+    </div>
+  </section>
+
+  <!-- ===== APP ===== -->
+  <section id="app" class="hidden">
+    <header>
+      <h1>Upscaler</h1>
+      <button class="ghost" id="logoutBtn">Abmelden</button>
+    </header>
+
+    <div class="card">
+      <input type="file" id="file" accept="video/*" class="hidden">
+      <button class="btn btn-big" id="pickBtn">Video upscalen</button>
+
+      <label for="mode">Zielauflösung</label>
+      <select id="mode">
+        <option value="max" selected>So weit wie es geht (2×, bis 4K)</option>
+        <option value="1080">Full HD (1920 × 1080)</option>
+        <option value="2x">Doppelt, ohne Obergrenze</option>
+      </select>
+
+      <label class="check"><input type="checkbox" id="denoise"> Vorher entrauschen (bei WhatsApp-Videos und altem Material)</label>
+
+      <div id="progressBox" class="hidden">
+        <div class="bar" id="bar"><i></i></div>
+        <div class="small" id="phase"></div>
+      </div>
+      <div class="err" id="appErr"></div>
+    </div>
+
+    <div class="card">
+      <div class="row" style="margin-bottom:6px">
+        <strong>Deine Videos</strong>
+        <span class="small" style="text-align:right">werden nach 24 h gelöscht</span>
+      </div>
+      <div id="jobs"><div class="small">Noch nichts hochgeladen.</div></div>
+    </div>
+
+    <p class="hint">Am besten im WLAN hochladen. Die Seite kann geschlossen werden — die Umrechnung läuft auf dem Server weiter. Beim nächsten Öffnen steht das fertige Video zum Download bereit.</p>
+  </section>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const login = $('login'), app = $('app');
+  let pollTimer = null;
+
+  // ---------- Hilfen ----------
+  const fmtMB = (b) => b ? (b / 1e6).toFixed(b > 1e8 ? 0 : 1) + ' MB' : '';
+  const fmtTime = (s) => {
+    s = Math.round(s || 0);
+    return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0') + ' min';
+  };
+  async function api(url, opt = {}) {
+    const r = await fetch(url, { credentials: 'same-origin', ...opt });
+    let data = null;
+    try { data = await r.json(); } catch (_) {}
+    if (r.status === 401 && !url.endsWith('/login')) { show(false); throw new Error('Sitzung abgelaufen. Bitte neu anmelden.'); }
+    if (!r.ok) throw new Error((data && data.error) || ('Fehler ' + r.status));
+    return data;
+  }
+  function show(loggedIn) {
+    login.classList.toggle('hidden', loggedIn);
+    app.classList.toggle('hidden', !loggedIn);
+    if (loggedIn) { refresh(); startPolling(); } else { stopPolling(); }
+  }
+
+  // ---------- Login ----------
+  $('loginBtn').onclick = async () => {
+    $('loginErr').textContent = '';
+    $('loginBtn').disabled = true;
+    try {
+      await api('/api/login', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: $('u').value.trim(), password: $('p').value }),
+      });
+      $('p').value = '';
+      show(true);
+    } catch (e) { $('loginErr').textContent = e.message; }
+    $('loginBtn').disabled = false;
+  };
+  $('p').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('loginBtn').click(); });
+  $('logoutBtn').onclick = async () => { await api('/api/logout', { method: 'POST' }); show(false); };
+
+  // ---------- Upload ----------
+  $('pickBtn').onclick = () => $('file').click();
+  $('file').onchange = () => {
+    const f = $('file').files[0];
+    if (f) uploadFile(f);
+    $('file').value = '';
+  };
+
+  function uploadFile(file) {
+    $('appErr').textContent = '';
+    $('pickBtn').disabled = true;
+    $('progressBox').classList.remove('hidden');
+    const bar = $('bar'); bar.classList.remove('busy');
+    const fill = bar.firstElementChild;
+    fill.style.width = '0%';
+    $('phase').textContent = 'Hochladen … 0 % von ' + fmtMB(file.size);
+
+    const fd = new FormData();
+    fd.append('mode', $('mode').value);
+    fd.append('denoise', $('denoise').checked ? '1' : '0');
+    fd.append('video', file, file.name);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/upload');
+    xhr.withCredentials = true;
+    xhr.upload.onprogress = (e) => {
+      if (!e.lengthComputable) return;
+      const pct = Math.round(e.loaded / e.total * 100);
+      fill.style.width = pct + '%';
+      $('phase').textContent = 'Hochladen … ' + pct + ' % von ' + fmtMB(file.size);
+      if (pct >= 100) { bar.classList.add('busy'); $('phase').textContent = 'Video wird geprüft …'; }
+    };
+    xhr.onerror = () => fail('Verbindung abgebrochen. WLAN prüfen und erneut versuchen.');
+    xhr.onload = () => {
+      let data = null;
+      try { data = JSON.parse(xhr.responseText); } catch (_) {}
+      if (xhr.status === 401) { show(false); return; }
+      if (xhr.status !== 200) return fail((data && data.error) || 'Upload fehlgeschlagen (' + xhr.status + ').');
+      $('progressBox').classList.add('hidden');
+      $('pickBtn').disabled = false;
+      refresh();
+    };
+    xhr.send(fd);
+
+    function fail(msg) {
+      $('appErr').textContent = msg;
+      $('progressBox').classList.add('hidden');
+      $('pickBtn').disabled = false;
+    }
+  }
+
+  // ---------- Liste ----------
+  async function refresh() {
+    let list;
+    try { list = await api('/api/jobs'); } catch (e) { return; }
+    const box = $('jobs');
+    if (!list.length) { box.innerHTML = '<div class="small">Noch nichts hochgeladen.</div>'; return; }
+    box.innerHTML = list.map((j) => {
+      const i = j.info || {};
+      const t = i.target || {};
+      const from = i.width ? `${i.width}×${i.height}` : '';
+      const to = t.width ? ` → ${t.width}×${t.height}` : '';
+      let status = '';
+      if (j.status === 'queued') status = '<span>Wartet …</span>';
+      if (j.status === 'processing') status = `<div class="bar"><i style="width:${j.progress}%"></i></div><span>Wird berechnet … ${j.progress} %</span>`;
+      if (j.status === 'done') status = `<span class="st-done">Fertig · ${fmtMB(j.outSize)}</span>`;
+      if (j.status === 'error') status = `<span class="st-error">Fehler: ${esc(j.error || '')}</span>`;
+      const dl = j.status === 'done' ? `<a class="dl" href="/download/${j.id}">Herunterladen</a>` : '';
+      const del = j.status !== 'processing' ? `<button class="del" data-del="${j.id}">Löschen</button>` : '';
+      return `<div class="job">
+        <div class="name">${esc(j.name)}</div>
+        <div class="meta">${from}${to}${i.duration ? ' · ' + fmtTime(i.duration) : ''}</div>
+        <div class="meta">${status}</div>
+        <div class="row" style="justify-content:flex-start">${dl}${del}</div>
+      </div>`;
+    }).join('');
+    box.querySelectorAll('[data-del]').forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm('Dieses Video vom Server löschen?')) return;
+        try { await api('/api/jobs/' + b.dataset.del, { method: 'DELETE' }); } catch (e) { $('appErr').textContent = e.message; }
+        refresh();
+      };
+    });
+  }
+  function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+  function startPolling() { stopPolling(); pollTimer = setInterval(refresh, 3000); }
+  function stopPolling() { if (pollTimer) clearInterval(pollTimer); pollTimer = null; }
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopPolling(); else if (!app.classList.contains('hidden')) { refresh(); startPolling(); }
+  });
+
+  // ---------- Start ----------
+  fetch('/api/me', { credentials: 'same-origin' })
+    .then((r) => show(r.ok))
+    .catch(() => show(false));
+})();
+</script>
+</body>
+</html>
