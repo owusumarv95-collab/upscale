@@ -1,10 +1,12 @@
-'use strict';
 
+Server · JS
+'use strict';
+ 
 // ---------------------------------------------------------------
 //  Video-Upscaler Server
 //  Login -> Upload -> ffmpeg im Hintergrund -> Download
 // ---------------------------------------------------------------
-
+ 
 const express = require('express');
 const multer = require('multer');
 const cookieSession = require('cookie-session');
@@ -12,7 +14,7 @@ const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-
+ 
 // ---------- Einstellungen (kommen aus den Railway-Variablen) ----
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const APP_USER = process.env.APP_USER;
@@ -22,21 +24,24 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const MAX_UPLOAD_MB = parseInt(process.env.MAX_UPLOAD_MB || '4000', 10);
 const KEEP_HOURS = parseInt(process.env.KEEP_HOURS || '24', 10);
 const SESSION_DAYS = parseInt(process.env.SESSION_DAYS || '30', 10);
-
+// Rechenfaeden fuer ffmpeg. Mehr = schneller, aber deutlich mehr Speicher.
+// 2 passt in 1 GB RAM (Railway-Testphase). Mit 8 GB koennen es 4-6 sein.
+const FFMPEG_THREADS = parseInt(process.env.FFMPEG_THREADS || '2', 10);
+ 
 if (!APP_USER || !APP_PASS || !SESSION_SECRET) {
   console.error('FEHLER: Die Variablen APP_USER, APP_PASS und SESSION_SECRET muessen gesetzt sein.');
   process.exit(1);
 }
-
+ 
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 const OUTPUT_DIR = path.join(DATA_DIR, 'outputs');
 const JOBS_FILE = path.join(DATA_DIR, 'jobs.json');
 for (const d of [UPLOAD_DIR, OUTPUT_DIR]) fs.mkdirSync(d, { recursive: true });
-
+ 
 // ---------- Jobs (Auftraege) ------------------------------------
 // Ein Job = ein hochgeladenes Video mit Status und Fortschritt.
 let jobs = new Map();
-
+ 
 function loadJobs() {
   try {
     const raw = JSON.parse(fs.readFileSync(JOBS_FILE, 'utf8'));
@@ -53,7 +58,7 @@ function loadJobs() {
     }
   } catch (_) { /* noch keine Datei, ist ok */ }
 }
-
+ 
 function saveJobs() {
   try {
     fs.writeFileSync(JOBS_FILE, JSON.stringify([...jobs.values()], null, 1));
@@ -61,9 +66,9 @@ function saveJobs() {
     console.error('jobs.json konnte nicht geschrieben werden:', e.message);
   }
 }
-
+ 
 loadJobs();
-
+ 
 function publicJob(j) {
   return {
     id: j.id,
@@ -77,7 +82,7 @@ function publicJob(j) {
     outSize: j.outSize || null,
   };
 }
-
+ 
 // ---------- ffprobe: Video vermessen -----------------------------
 function probe(file) {
   return new Promise((resolve, reject) => {
@@ -105,7 +110,7 @@ function probe(file) {
     });
   });
 }
-
+ 
 // ---------- Zielaufloesung berechnen -----------------------------
 // mode: "max" = so weit es geht (2x, hoechstens 4K)
 //       "1080" = auf Full HD
@@ -114,7 +119,7 @@ function planTarget(info, mode) {
   const w = info.width, h = info.height;
   const long = Math.max(w, h), short = Math.min(w, h);
   let scale;
-
+ 
   if (mode === '1080') {
     scale = Math.min(1920 / long, 1080 / short);
   } else if (mode === '2x') {
@@ -122,14 +127,14 @@ function planTarget(info, mode) {
   } else {
     scale = Math.min(2, 3840 / long, 2160 / short);
   }
-
+ 
   // Wenn das Original schon gross genug ist: nur nachschaerfen
   if (scale < 1.05) scale = 1;
-
+ 
   const even = (n) => Math.max(2, Math.round(n / 2) * 2);
   return { width: even(w * scale), height: even(h * scale), scale: +scale.toFixed(2) };
 }
-
+ 
 // ---------- ffmpeg: die eigentliche Arbeit ------------------------
 function runFfmpeg(job) {
   return new Promise((resolve, reject) => {
@@ -138,23 +143,27 @@ function runFfmpeg(job) {
     if (job.denoise) filters.push('hqdn3d=2:1:2:3');
     if (t.scale !== 1) filters.push(`scale=${t.width}:${t.height}:flags=lanczos`);
     filters.push('unsharp=5:5:0.7:5:5:0.0');
-
+ 
+    const T = FFMPEG_THREADS;
     const args = [
       '-hide_banner', '-y', '-nostdin',
+      '-threads', String(T), '-filter_threads', String(T),
       '-i', job.input,
       '-vf', filters.join(','),
-      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20',
+      '-c:v', 'libx264', '-preset', 'superfast', '-crf', '20',
+      // Speicherschlank: wenig Vorausblick, keine B-Frames, feste Threadzahl
+      '-x264-params', `threads=${T}:lookahead-threads=1:rc-lookahead=8:ref=1:bframes=0`,
       '-pix_fmt', 'yuv420p',
       '-c:a', 'aac', '-b:a', '160k',
       '-movflags', '+faststart',
       '-progress', 'pipe:1', '-nostats',
       job.output,
     ];
-
+ 
     const p = spawn('ffmpeg', args);
     let stderrTail = '';
     let buf = '';
-
+ 
     p.stdout.on('data', (chunk) => {
       buf += chunk.toString();
       const lines = buf.split('\n');
@@ -169,27 +178,34 @@ function runFfmpeg(job) {
     });
     p.stderr.on('data', (c) => { stderrTail = (stderrTail + c.toString()).slice(-1500); });
     p.on('error', (e) => reject(new Error('ffmpeg konnte nicht gestartet werden: ' + e.message)));
-    p.on('close', (code) => {
+    p.on('close', (code, signal) => {
       if (code === 0) return resolve();
+      console.error('ffmpeg beendet: code=' + code + ' signal=' + signal);
       console.error('ffmpeg stderr:', stderrTail);
+      if (signal === 'SIGKILL' || code === 137) {
+        return reject(new Error('Vom Server abgebrochen: Arbeitsspeicher voll. Kleinere Zielaufloesung waehlen oder FFMPEG_THREADS senken.'));
+      }
+      if (signal) {
+        return reject(new Error('Vom Server beendet (' + signal + '), vermutlich Neustart. Bitte erneut hochladen.'));
+      }
       reject(new Error('ffmpeg ist abgebrochen (Code ' + code + ').'));
     });
   });
 }
-
+ 
 // ---------- Warteschlange: ein Video nach dem anderen -------------
 let working = false;
-
+ 
 async function pump() {
   if (working) return;
   const next = [...jobs.values()].find((j) => j.status === 'queued');
   if (!next) return;
   working = true;
-
+ 
   next.status = 'processing';
   next.progress = 0;
   saveJobs();
-
+ 
   try {
     await runFfmpeg(next);
     next.status = 'done';
@@ -208,7 +224,7 @@ async function pump() {
     setImmediate(pump);
   }
 }
-
+ 
 // ---------- Aufraeumen: alte Ergebnisse loeschen -----------------
 function cleanup() {
   const limit = Date.now() - KEEP_HOURS * 3600 * 1000;
@@ -227,12 +243,12 @@ function cleanup() {
 }
 setInterval(cleanup, 60 * 60 * 1000);
 cleanup();
-
+ 
 // ---------- Login-Schutz -------------------------------------------
 const app = express();
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
-
+ 
 app.use(cookieSession({
   name: 'upscaler',
   keys: [SESSION_SECRET],
@@ -241,7 +257,7 @@ app.use(cookieSession({
   sameSite: 'lax',
 }));
 app.use(express.json({ limit: '10kb' }));
-
+ 
 // Bremse gegen Passwort-Raten: 5 Fehlversuche -> 15 Minuten Sperre
 const failures = new Map();
 function locked(ip) {
@@ -255,18 +271,18 @@ function noteFailure(ip) {
   f.last = Date.now();
   failures.set(ip, f);
 }
-
+ 
 function safeEqual(a, b) {
   const ha = crypto.createHash('sha256').update(String(a)).digest();
   const hb = crypto.createHash('sha256').update(String(b)).digest();
   return crypto.timingSafeEqual(ha, hb);
 }
-
+ 
 function requireAuth(req, res, next) {
   if (req.session && req.session.user === APP_USER) return next();
   res.status(401).json({ error: 'Nicht eingeloggt.' });
 }
-
+ 
 app.post('/api/login', (req, res) => {
   const ip = req.ip;
   if (locked(ip)) {
@@ -281,17 +297,17 @@ app.post('/api/login', (req, res) => {
   noteFailure(ip);
   res.status(401).json({ error: 'Benutzername oder Passwort falsch.' });
 });
-
+ 
 app.post('/api/logout', (req, res) => {
   req.session = null;
   res.json({ ok: true });
 });
-
+ 
 app.get('/api/me', (req, res) => {
   if (req.session && req.session.user === APP_USER) return res.json({ user: APP_USER });
   res.status(401).json({ user: null });
 });
-
+ 
 // ---------- Upload -------------------------------------------------
 const upload = multer({
   storage: multer.diskStorage({
@@ -303,7 +319,7 @@ const upload = multer({
   }),
   limits: { fileSize: MAX_UPLOAD_MB * 1024 * 1024, files: 1 },
 });
-
+ 
 app.post('/api/upload', requireAuth, (req, res) => {
   upload.single('video')(req, res, async (err) => {
     if (err) {
@@ -313,7 +329,7 @@ app.post('/api/upload', requireAuth, (req, res) => {
       return res.status(400).json({ error: msg });
     }
     if (!req.file) return res.status(400).json({ error: 'Keine Datei erhalten.' });
-
+ 
     let info;
     try {
       info = await probe(req.file.path);
@@ -321,13 +337,13 @@ app.post('/api/upload', requireAuth, (req, res) => {
       try { fs.unlinkSync(req.file.path); } catch (_) {}
       return res.status(400).json({ error: e.message });
     }
-
+ 
     const mode = ['max', '1080', '2x'].includes(req.body.mode) ? req.body.mode : 'max';
     const target = planTarget(info, mode);
     const id = crypto.randomBytes(6).toString('hex');
     const base = path.parse(req.file.originalname).name.replace(/[^\w.\-äöüÄÖÜß ]+/g, '_').slice(0, 60) || 'video';
     const outName = `${base}_${target.width}x${target.height}.mp4`;
-
+ 
     const job = {
       id,
       name: req.file.originalname,
@@ -347,19 +363,19 @@ app.post('/api/upload', requireAuth, (req, res) => {
     res.json(publicJob(job));
   });
 });
-
+ 
 // ---------- Status, Liste, Loeschen ---------------------------------
 app.get('/api/jobs', requireAuth, (_req, res) => {
   const list = [...jobs.values()].sort((a, b) => b.created - a.created).map(publicJob);
   res.json(list);
 });
-
+ 
 app.get('/api/jobs/:id', requireAuth, (req, res) => {
   const j = jobs.get(req.params.id);
   if (!j) return res.status(404).json({ error: 'Unbekannter Auftrag.' });
   res.json(publicJob(j));
 });
-
+ 
 app.delete('/api/jobs/:id', requireAuth, (req, res) => {
   const j = jobs.get(req.params.id);
   if (!j) return res.status(404).json({ error: 'Unbekannter Auftrag.' });
@@ -371,7 +387,7 @@ app.delete('/api/jobs/:id', requireAuth, (req, res) => {
   saveJobs();
   res.json({ ok: true });
 });
-
+ 
 // ---------- Download -----------------------------------------------
 app.get('/download/:id', requireAuth, (req, res) => {
   const j = jobs.get(req.params.id);
@@ -380,10 +396,11 @@ app.get('/download/:id', requireAuth, (req, res) => {
   }
   res.download(j.output, j.outName);
 });
-
+ 
 // ---------- Statische Seite -----------------------------------------
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h' }));
-
+ 
 app.listen(PORT, () => {
   console.log(`Upscaler laeuft auf Port ${PORT}, Daten in ${DATA_DIR}`);
 });
+ 
